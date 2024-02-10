@@ -1,0 +1,601 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  
+	<link rel="stylesheet" href="./src/css/webix.css" type="text/css" media="screen" charset="utf-8">
+	<link rel="stylesheet" href="./src/css/spreadsheet.css" type="text/css" media="screen" charset="utf-8">
+	<script src="./src/js/jquery-3.4.1.min.js" type="text/javascript"></script>
+	<script src="./src/js/pako.min.js"></script>
+	<script src="./src/js/webix.js"></script>
+	<script src="./src/js/spreadsheet.js"></script>
+	<script src="./src/js/script.js"></script>
+    
+</head>
+<style>
+</style>
+
+<body style="">
+   <div style="width:2000px"></div>
+  <script>
+
+  //GBK = Chineese Text Format
+  //CP949 or Windows-949 = Korean Text Format
+  //UTF-8 or utf8 = Normal Text Format
+  var charset = "GBK";
+  var Decode = new TextDecoder( charset );
+  var Encode = new TextEncoder( charset );
+  var localStructureKey = "localStructureKey";
+
+    function hide(id){ eval(`$$("`+id+`").hide();`);}
+    function show(id){ eval(`$$("`+id+`").show();`);}
+    function getStructureFromLocal()
+    {
+      let text = window.localStorage.getItem(localStructureKey);
+      return text == null ? TEMP_INFO : text;
+    }
+    function saveStructureToLocal()
+    {
+      let text = $$("textStructure").getValue();
+      window.localStorage.setItem(localStructureKey, text);
+      InitStructure();
+    }
+
+  webix.ready(function(){
+
+    InitStructure();
+
+    webix.ui({
+    id:"editStructure",
+    view:"popup",
+    position:"center",
+    body:{
+      view:"form", 
+      id:"log_form",
+      width:window.innerWidth/2+200,
+      height:window.innerHeight-200,
+      elements:[
+          { view:"label", label:"Edit Structure",align:"center"},
+          { view:"textarea", id:"textStructure", width:window.innerWidth/2+200,height:window.innerHeight-320 },
+          { view:"button", value:"Save", css:"webix_primary",
+            click: function(){ 
+              saveStructureToLocal();
+              hide("editStructure"); 
+            }
+          },
+      ]
+    }
+  }).hide();
+
+    webix.ui({
+      view:"spreadsheet",
+      id:mSheetID,
+      name:mSheetName,
+      columnCount:mColumnCount,
+      rowCount:mRowCount,
+      on:{
+        onColumnInit: (col) => {
+          if ( col.id <= mColumnCount ) {
+            let header_text = st_header_list[(col.id - 1 )].name;
+            if( header_text !== undefined ){
+            	col.header.text = header_text;
+            }
+          }
+        }
+      },
+      buttons: {
+        //"undo": ["undo","redo"],
+        //"text": ["font-weight","font-style","text-decoration","color"],
+        "$title": [{
+          view: "label", width: 200, id:"mylabel", label: mSheetName
+        }],
+        "": [
+          {
+            view:"button",
+            value:"Edit Structure",
+            width: 200,
+            click:function(){
+              $$("textStructure").setValue( getStructureFromLocal() );
+              show("editStructure");
+            }
+          },
+          {
+          view:"uploader",
+          id:"choosefile",
+          value:"Choose File",
+          width: 200,    
+          autosend:false, 
+          multiple:false,
+          on:{
+              onBeforeFileAdd: function(upload){
+                mFileInput = upload.file;
+                mFileReader = new FileReader();  
+                mFileReader.onload = function(event) {
+                  Uncompress(mFileReader);
+                };
+                mFileReader.readAsArrayBuffer( mFileInput );
+                return false;
+              }
+            }
+          },
+          {
+          view:"button",
+          id:"savefile",
+          value:"Save File",
+          width: 200,    
+          autosend:false, 
+          multiple:false,
+          click: function(){
+              Compress(false);
+            }
+          },
+          {
+          view:"button",
+          id:"toexcel",
+          value:"Export to CSV",
+          width: 200,    
+          autosend:false, 
+          multiple:false,
+          click: function(){
+              Compress(true);
+            }
+          },
+        ],
+		  }
+    });
+
+  });
+
+var struct_map = [];
+var define_map = [];
+function findDefine( key ){ return define_map[key] !== undefined ? define_map[key].value : parseInt(key); }
+function findStructure( key ){ return struct_map[key]; } 
+function findStructMemer(struct_list,k){ return eval( "struct_list.value."+Object.keys( struct_list.value )[k] ); };
+
+function InitStructure()
+{
+  //window.localStorage.clear();
+  let struct_field_temp = function(){return { name:"", type:"", length:0 }};
+  let struct_field = struct_field_temp;
+  let struct_body = [];
+  let commentChar;
+  let createField = function( string_list, struct_list )
+  {
+    if( string_list[1].indexOf("[") != -1 )
+    {
+      string_list[1] = string_list[1].replace(/]/g,"");
+      let slr = string_list[1].split('[');
+      let arCount = 1;
+      for( let j = 1; j < slr.length; j++ )
+      {
+        slr[j] = findDefine( slr[j] );
+        arCount *= slr[j];
+      }
+      if( struct_list == undefined )
+      {
+        if( string_list[0] == "char" )
+        {
+          arCount /= slr[ slr.length - 1 ];
+        }
+      }
+      for( let j = 0; j < arCount; j++ )
+      {
+        if( struct_list == undefined )
+        {
+          //console.log( "found member:%s, type:%s, slr:%s", string_list[1], string_list[0], slr );
+          struct_field = struct_field_temp();
+          struct_field.name = `${slr[0]}${arCount==1?'':j}`;
+          struct_field.type = string_list[0];
+          struct_field.length = string_list[0] == "char" ? slr[ slr.length - 1 ] : 4;
+          struct_body[struct_field.name] = ( struct_field );
+        }
+        else
+        {
+          for( let k = 0; k < struct_list.length; k++ )
+          {
+            let findKey = findStructMemer(struct_list,k);
+            struct_field = struct_field_temp();
+            struct_field.name = `${slr[0]}${j}_${findKey.name}`;
+            struct_field.type = findKey.type;
+            struct_field.length = findKey.length;
+            struct_body[struct_field.name] = struct_field;
+          }
+        }
+      }
+    }
+    else
+    {
+      if( struct_list == undefined )
+      {
+        //console.log( "found member:%s, type:%s", string_list[1], string_list[0] );
+        struct_field = struct_field_temp();
+        struct_field.name = string_list[1];
+        struct_field.type = string_list[0];
+        struct_field.length = string_list[0] == "char" ? 1 : 4;
+        struct_body[struct_field.name] = struct_field;
+      }
+      else
+      {
+        for( let k = 0; k < struct_list.length; k++ )
+        {
+          let findKey = findStructMemer(struct_list,k);
+          struct_field = struct_field_temp();
+          struct_field.name = `${string_list[1]}_${findKey.name}`;
+          struct_field.type = findKey.type;
+          struct_field.length = findKey.length;
+          struct_body[struct_field.name] = struct_field;
+        }
+      }
+    }
+  }
+
+  let lines = getStructureFromLocal().split('\n');
+  for( let i = 0; i < lines.length; i++ )
+  {
+    commentChar = lines[i].indexOf("/");
+    if( commentChar != -1 )
+    {
+      lines[i] = lines[i].substring( 0, commentChar );
+    }
+    let slist = lines[i].split(/\s/g);
+    slist = slist.filter( slist => slist != "" );
+    
+    //console.log(slist);
+    if( slist.length == 3 && slist[0] == "#define" )
+    {
+      slist[2] = findDefine( slist[2] );
+      //console.log( "found define => name : %s , size : %d", slist[1], slist[2] );
+      if( slist[2] == 0 )
+      {
+        continue;
+      }
+      define_map[slist[1]] = { name: slist[1], value: slist[2] };
+    }
+    else if( ( slist.length == 1 && slist[0].indexOf(";") != -1 ) )
+    {
+      slist[0] = slist[0].replace(";","");
+      struct_map[ slist[0] ] = { name:slist[0], value:struct_body, length:Object.keys( struct_body ).length };
+      struct_map.length++;
+      //console.log(struct_map);
+    }
+    else if( slist.length == 1 && slist[0] == "{" )
+    {
+      struct_body = [];
+      //console.log(struct_field);
+    }
+    else if( slist.length == 2 && slist[1].indexOf(";") != -1 )
+    {
+      slist[0] = slist[0].replace(/\s/g,"");
+      slist[1] = slist[1].replace(";","");
+      if( slist[0] == "int"|| slist[0] == "char" )
+      {
+        createField(slist);
+      }
+      else
+      {
+        let fStructure = findStructure( slist[0] );
+        if( fStructure != undefined && fStructure.value != undefined )
+        {
+          createField(slist, fStructure);
+        }
+      }
+    }
+  };
+}
+
+function CreateSheet()
+{
+  use_structure = CheckFileStructureType();
+  if( struct_map[use_structure] == undefined || struct_map[use_structure].length == 0  )
+  {
+    Alert( "error", `Not found Structure of ${use_structure} or Structure size is 0` );
+    return;
+  }
+  //console.log( struct_map[use_structure] );
+  st_header_list = [];
+  st_header_list.total = 0;
+  for( let i = 0; i < struct_map[use_structure].length; i++ )
+  {
+    st_header_list[i] = findStructMemer( struct_map[use_structure], i );
+    st_header_list.total += st_header_list[i].length;
+  }
+  //console.log( st_header_list );
+
+  mBaseData.data = [];
+  mPosition = mPositionType(4)
+  tPosition = mPosition;
+  for( let i = 0; i < mRowCount; i++ )
+  {
+    for( var j = 0; j < st_header_list.length; j++ )
+    {
+      if( st_header_list[j].type == "char" )
+      {
+        value = mOriginal.Char( tPosition, st_header_list[j].length );
+      }
+      else if( st_header_list[j].type == "int" )
+      {
+        value = mOriginal.Int( tPosition );
+      }
+      tPosition += st_header_list[j].length;
+      mBaseData.data.push( [ (i+1),(j+1),value.toString().replace("","") ] );
+    }
+  }
+	//console.log( mBaseData.data );
+  mColumnCount = st_header_list.length;
+  AddRow( mSheetID, mBaseData );
+
+  $$(mSheetID).attachEvent("onBeforeValueChange",function(row,column,newValue,oldValue){
+    if( column - 1 > st_header_list.length )
+    {
+      Alert( "error", "Column mismatch" );
+      return false;
+    }
+    
+    tPosition = (row-1) * st_header_list.total;
+    for( let i = 0; i < column; i++ )
+    {
+      tPosition += st_header_list[i].length;
+    }
+    tPosition -= st_header_list[column-1].length;
+    tPosition += mPosition;
+
+    if( st_header_list[column-1].type == "char" )
+    {
+      if( newValue == "" )
+      {
+        value = new Uint8Array( st_header_list[column-1].length );
+      }
+      else
+      {
+        value = String().Encode.encode(newValue);
+        if( value.length >= st_header_list[column-1].length )
+        {
+          Alert( "error", `Maximun is ${(st_header_list[column-1].length-1)} characters for this column` );
+          return false;
+        }
+      }
+      //console.log(value);
+      mOriginal.Replace( value, tPosition, st_header_list[column-1].length );
+      //console.log( mOriginal.slice( tPosition, tPosition + st_header_list[column-1].length ) );
+      //console.log("Char:onCellChange:",$$(mSheetID).getCellValue(row, column));
+    }
+    else if( st_header_list[column-1].type == "int" )
+    {
+      newValue = parseInt( newValue )
+      if( isNaN( newValue ) )
+      {
+        Alert( "error", "can be used only numeric for this column" );
+        return false;
+      }
+      //if( newValue < 0 || newValue > 2000000000 )
+      //{
+        //Alert( "error", "Minimium is 0.<br/>Maximum is 2,000,000,000" );
+        //return false;
+      //}
+      mOriginal.Int2Array( tPosition, newValue );
+      console.log( mOriginal.slice( tPosition, tPosition+4 ) );
+    }
+    return true;
+  });
+}
+
+function Alert( title, text )
+{
+  webix.alert({
+    title: title.toUpperCase(),
+    text: text+".",
+    //type:"alert-"+title.toLowerCase(),
+    width:400
+  });
+}
+
+function mPositionType(val)
+{
+  mFileInput.name = mFileInput.name.toUpperCase();
+  let a;
+  if( mFileInput.name.indexOf("005_00001") != -1 )
+    a = val;
+  else if( mFileInput.name.indexOf("005_00002") != -1 )
+    a = val + 36;
+  else if( mFileInput.name.indexOf("005_00003") != -1 )
+    a = val + 80;
+  else if( mFileInput.name.indexOf("005_00004") != -1 )
+    a = val + 60;
+  else if( mFileInput.name.indexOf("005_00005") != -1 )
+    a = val + 32;
+  else if( mFileInput.name.indexOf("005_00006") != -1 )
+    a = val;
+  else if( mFileInput.name.indexOf(".WREGION") != -1 )
+    a = val;
+  else
+    a = 0;
+  return a;
+}
+
+function CheckFileStructureType()
+{
+  mFileInput.name = mFileInput.name.toUpperCase();
+  let a;
+  if( mFileInput.name.indexOf("005_00001") != -1 )
+    a = "LEVEL_INFO";
+  else if( mFileInput.name.indexOf("005_00002") != -1 )
+    a = "ITEM_INFO";
+  else if( mFileInput.name.indexOf("005_00003") != -1 )
+    a = "SKILL_INFO";
+  else if( mFileInput.name.indexOf("005_00004") != -1 )
+    a = "MONSTER_INFO";
+  else if( mFileInput.name.indexOf("005_00005") != -1 )
+    a = "NPC_INFO";
+  else if( mFileInput.name.indexOf("005_00006") != -1 )
+    a = "QUEST_INFO";
+  else if( mFileInput.name.indexOf(".WREGION") != -1 )
+    a = "WORLD_REGION_INFO";
+  else
+    a = "";
+  return a;
+}
+
+
+var mOriginal = [];
+var mOriginalSize = 0;
+var mCompress = [];
+var mCompressSize = 0;
+
+
+Uint8Array.prototype.convertToHex = function(position,str) {
+  for( let i = 0; i <str.length; i++ ) {
+    this[position+i] = ''+str.charCodeAt(i).toString(16);
+  }
+}
+
+var temp_file_name;
+function Compress(toCSV = false)
+{
+  if( use_structure == "" )
+  {
+    return;
+  }
+  temp_file_name = mFileInput.name;
+  if( toCSV )
+  {
+    mCompress = "";
+    for( let i = 0; i < mRowCount; i++ )
+    {
+      for( let j = 0; j < mColumnCount; j++ )
+      {
+        mCompress += `${mBaseData.data[(i*mColumnCount) + (j) ][2] }|`;
+      }
+      mCompress +="\n";
+    }
+    let l = temp_file_name.indexOf(".");
+    if( l != -1 )
+    {
+      temp_file_name = temp_file_name.substring( 0, l );
+    }
+    temp_file_name += ".CSV";
+  }
+  else
+  {
+    if( use_structure != "WORLD_REGION_INFO" )
+    {
+      try {
+        mCompress= zlib.deflate( mOriginal );
+        mCompress = mCompress.PushFront( 8, mCompress );
+        mCompress.Int2Array( 0, mOriginalSize );
+        mCompress.Int2Array( 4, mCompress.byteLength - 8 );
+        //console.log( mOriginal );
+      } catch (err) {
+        Alert( 'error', 'Unable to compress data' );
+        console.log(err);
+        return;
+      }
+    }
+    else
+    {
+      mCompress = mOriginal;
+    }
+    //console.log( mCompress );
+  }
+  let blob = new Blob( [mCompress] , { type : "text/plain;charset="+`${charset}`+";" } );
+  let a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = temp_file_name;
+  a.click();
+}
+function Uncompress(reader)
+{
+  if( mFileInput.name.indexOf(".WREGION") != -1 )
+  {
+    mOriginal = new Uint8Array( reader.result );
+  }
+  else if( mFileInput.name.indexOf(".IMG") != -1 )
+  {
+    mOriginalSize = reader.result.slice( 0, 4 ).Int();
+    mCompressSize = reader.result.slice( 4, 8 ).Int();
+    mCompress = reader.result.slice( 8, reader.result.length );
+    mOriginal = zlib.inflate( mCompress );
+    console.log("uncompressing data size:%d",mOriginal.byteLength);
+    if( mOriginalSize != mOriginal.byteLength )
+    {
+      Alert( "warning","uncompressing data mismatch");
+      return;
+    }
+  }
+  else
+  {
+    Alert( "warning","Unknow file type");
+    return;
+  }
+  mRowCount = mOriginal.Int(0);
+  CreateSheet();
+}
+
+ArrayBuffer.prototype.Int = function()
+{
+  return new Uint8Array(this).Int(0);
+}
+Uint8Array.prototype.Int = function(position)
+{
+  return this[position] << 32 | 
+    (this[position+3] << 24) | 
+    (this[position+2] << 16) | 
+    (this[position+1] << 8);
+}
+Uint8Array.prototype.Int2Array = function(position,value)
+{
+  this[position] = ( value & 0X000000FF )        ;
+  this[position+1] = ( value & 0X0000FF00 ) >>  8;
+  this[position+2] = ( value & 0x00FF0000 ) >> 16;
+  this[position+3] = ( value & 0xFF000000 ) >> 24;
+}
+Uint8Array.prototype.Char = function( position, len )
+{
+    if( this[position] == 0x00 )
+    {
+        return "";
+    }
+    for( let i = position; i < position+len; i++ )
+    {
+      if( this[i] == 0x00 )
+      {
+        len = i-position;
+        break;
+      }
+    }
+    var u8c = new Uint8Array( this.slice( position, (position + len)  ) );
+    return this.Decode.decode(u8c);
+}
+Uint8Array.prototype.Replace = function(data,position,len)
+{
+  for( let i = 0; i < len; i++ )
+  {
+    if( i < data.byteLength )
+      this[i+position] = data[i];
+    else
+    this[i+position] = 0x00;
+  }
+}
+Uint8Array.prototype.PushFront = function( size,data )
+{
+  let ar = new Uint8Array( size + data.byteLength );
+  for( let i = 0; i < data.byteLength; i++ )
+  {
+    ar[i+size] = data[i];
+  }
+  return ar;
+}
+Uint8Array.prototype.PushBack = function( size, data )
+{
+  let ar = new Uint8Array( size + data.byteLength );
+  for( let i = 0; i < data.byteLength; i++ )
+  {
+    ar[i] = data[i];
+  }
+  return ar;
+}
+Uint8Array.prototype.Decode = Decode;
+String.prototype.Encode = Encode;
+
+  </script>
+</body>
+</html>
